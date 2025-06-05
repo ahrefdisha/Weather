@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Advanced Weather Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-r from-blue-300 via-purple-200 to-pink-200 min-h-screen flex flex-col items-center p-6">
+
+  <h1 class="text-4xl font-bold mb-8 text-center">Advanced Weather Dashboard</h1>
+
+  <div class="w-full max-w-md mb-6">
+    <input id="cityInput" type="text" placeholder="Enter city name" 
+      class="w-full p-3 rounded border border-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3" />
+    <div class="flex justify-between items-center">
+      <button id="getWeatherBtn" 
+        class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded font-semibold transition">Get Weather</button>
+      <button id="unitToggleBtn" 
+        class="bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded font-semibold transition">Show °F</button>
+    </div>
+  </div>
+
+  <div id="loading" class="mb-6 text-blue-700 font-semibold hidden">Loading weather data...</div>
+  <div id="errorMsg" class="mb-6 text-red-700 font-semibold"></div>
+
+  <div id="weatherResult" class="bg-white p-6 rounded shadow-md w-full max-w-md hidden">
+    <!-- Current Weather -->
+    <div id="currentWeather" class="mb-6 text-center">
+      <!-- Filled by JS -->
+    </div>
+
+    <!-- 7-Day Forecast -->
+    <div id="forecast" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <!-- Filled by JS -->
+    </div>
+  </div>
+
+  <div class="w-full max-w-md mt-8">
+    <h2 class="font-semibold mb-2">Recent Searches</h2>
+    <ul id="searchHistory" class="list-disc pl-5 text-blue-700 cursor-pointer"></ul>
+  </div>
+
+  <script>
+    // Globals
+    let unit = 'metric'; // metric = °C, imperial = °F
+    const cityInput = document.getElementById('cityInput');
+    const getWeatherBtn = document.getElementById('getWeatherBtn');
+    const unitToggleBtn = document.getElementById('unitToggleBtn');
+    const loading = document.getElementById('loading');
+    const errorMsg = document.getElementById('errorMsg');
+    const weatherResult = document.getElementById('weatherResult');
+    const currentWeatherDiv = document.getElementById('currentWeather');
+    const forecastDiv = document.getElementById('forecast');
+    const searchHistoryUl = document.getElementById('searchHistory');
+
+    // LocalStorage keys
+    const STORAGE_KEY = 'weatherSearchHistory';
+
+    // Weather code descriptions (Open-Meteo)
+    const weatherCodes = {
+      0: "Clear sky",
+      1: "Mainly clear",
+      2: "Partly cloudy",
+      3: "Overcast",
+      45: "Fog",
+      48: "Depositing rime fog",
+      51: "Light drizzle",
+      53: "Moderate drizzle",
+      55: "Dense drizzle",
+      56: "Light freezing drizzle",
+      57: "Dense freezing drizzle",
+      61: "Slight rain",
+      63: "Moderate rain",
+      65: "Heavy rain",
+      66: "Light freezing rain",
+      67: "Heavy freezing rain",
+      71: "Slight snow",
+      73: "Moderate snow",
+      75: "Heavy snow",
+      77: "Snow grains",
+      80: "Slight rain showers",
+      81: "Moderate rain showers",
+      82: "Violent rain showers",
+      85: "Slight snow showers",
+      86: "Heavy snow showers",
+      95: "Thunderstorm",
+      96: "Thunderstorm with slight hail",
+      99: "Thunderstorm with heavy hail",
+    };
+
+    // Helper: format date
+    function formatDate(dateStr) {
+      const options = { weekday: 'short', month: 'short', day: 'numeric' };
+      const d = new Date(dateStr);
+      return d.toLocaleDateString(undefined, options);
+    }
+
+    // Helper: get wind direction from degrees
+    function getWindDirection(deg) {
+      const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+      return directions[Math.round(deg / 45) % 8];
+    }
+
+    // Save to localStorage
+    function saveSearch(city) {
+      let history = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      city = city.trim();
+      if (history.includes(city)) {
+        // Move to front
+        history = history.filter(c => c !== city);
+      }
+      history.unshift(city);
+      if (history.length > 5) history.pop();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+      renderSearchHistory();
+    }
+
+    // Render search history list
+    function renderSearchHistory() {
+      const history = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      searchHistoryUl.innerHTML = '';
+      history.forEach(city => {
+        const li = document.createElement('li');
+        li.textContent = city;
+        li.addEventListener('click', () => {
+          cityInput.value = city;
+          fetchWeather(city);
+        });
+        searchHistoryUl.appendChild(li);
+      });
+    }
+
+    // Get coordinates from city name
+    async function getCoordinates(city) {
+      const res = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1`);
+      const data = await res.json();
+      if (!data.results || data.results.length === 0) return null;
+      return data.results[0];
+    }
+
+    // Get weather from coordinates
+    async function getWeather(lat, lon) {
+      // Fetch current weather + 7 day forecast
+      // Units logic: Open-Meteo API returns Celsius, so if imperial required, convert manually
+      const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,weathercode&current_weather=true&timezone=auto`);
+      const data = await res.json();
+      return data;
+    }
+
+    // Convert C to F if needed
+    function cToF(c) {
+      return (c * 9/5 + 32).toFixed(1);
+    }
+
+    // Display weather data on page
+    function displayWeather(cityData, weatherData) {
+      const temp = weatherData.current_weather.temperature;
+      const windspeed = weatherData.current_weather.windspeed;
+      const winddir = weatherData.current_weather.winddirection;
+      const weatherCode = weatherData.current_weather.weathercode;
+      const time = weatherData.current_weather.time;
+      const timezone = weatherData.timezone;
+
+      // Convert temps for unit
+      let displayTemp = unit === 'metric' ? temp.toFixed(1) + ' °C' : cToF(temp) + ' °F';
+
+      // Clear previous
+      currentWeatherDiv.innerHTML = `
+        <h2 class="text-2xl font-semibold mb-2">${cityData.name}, ${cityData.country}</h2>
+        <p class="text-5xl font-bold mb-2">${displayTemp}</p>
+        <p class="text-lg capitalize mb-1">${weatherCodes[weatherCode] || 'Unknown'}</p>
+        <p class="mb-1">Wind: ${windspeed} km/h (${getWindDirection(winddir)})</p>
+        <p class="text-sm text-gray-600">Time: ${new Date(time).toLocaleString(undefined, { timeZone: timezone, hour12: true })}</p>
+      `;
+
+      // 7-day forecast
+      let daily = weatherData.daily;
+      forecastDiv.innerHTML = '';
+      for (let i = 0; i < daily.time.length; i++) {
+        let maxTemp = daily.temperature_2m_max[i];
+        let minTemp = daily.temperature_2m_min[i];
+
+        if (unit === 'imperial') {
+          maxTemp = cToF(maxTemp);
+          minTemp = cToF(minTemp);
+        } else {
+          maxTemp = maxTemp.toFixed(1);
+          minTemp = minTemp.toFixed(1);
+        }
+
+        const weatherDesc = weatherCodes[daily.weathercode[i]] || 'Unknown';
+
+        const dayDiv = document.createElement('div');
+        dayDiv.className = 'bg-blue-100 rounded p-3 text-center shadow';
+
+        dayDiv.innerHTML = `
+          <div class="font-semibold mb-1">${formatDate(daily.time[i])}</div>
+          <div>${weatherDesc}</div>
+          <div class="mt-2 text-sm">Max: ${maxTemp}°${unit === 'metric' ? 'C' : 'F'}</div>
+          <div class="text-sm">Min: ${minTemp}°${unit === 'metric' ? 'C' : 'F'}</div>
+        `;
+
+        forecastDiv.appendChild(dayDiv);
+      }
+
+      weatherResult.classList.remove('hidden');
+      errorMsg.textContent = '';
+    }
+
+    // Show loading
+    function showLoading() {
+      loading.classList.remove('hidden');
+      errorMsg.textContent = '';
+      weatherResult.classList.add('hidden');
+    }
+
+    // Hide loading
+    function hideLoading() {
+      loading.classList.add('hidden');
+    }
+
+    // Show error message
+    function showError(message) {
+      errorMsg.textContent = message;
+      weatherResult.classList.add('hidden');
+    }
+
+    // Main function: fetch and show weather
+    async function fetchWeather(city) {
+      if (!city) {
+        showError('Please enter a city name');
+        return;
+      }
+
+      showLoading();
+
+      try {
+        const cityData = await getCoordinates(city);
+        if (!cityData) {
+          showError('City not found. Please try again.');
+          hideLoading();
+          return;
+        }
+
+        const weatherData = await getWeather(cityData.latitude, cityData.longitude);
+        displayWeather(cityData, weatherData);
+
+        saveSearch(cityData.name);
+      } catch (err) {
+        showError('Error fetching weather data. Please try again later.');
+      } finally {
+        hideLoading();
+      }
+    }
+
+    // Unit toggle handler
+    unitToggleBtn.addEventListener('click', () => {
+      if (unit === 'metric') {
+        unit = 'imperial';
+        unitToggleBtn.textContent = 'Show °C';
+      } else {
+        unit = 'metric';
+        unitToggleBtn.textContent = 'Show °F';
+      }
+
+      // Refresh weather if city filled
+      if (cityInput.value.trim()) {
+        fetchWeather(cityInput.value.trim());
+      }
+    });
+
+    // Search button click
+    getWeatherBtn.addEventListener('click', () => {
+      fetchWeather(cityInput.value.trim());
+    });
+
+    // Recent searches render
+    renderSearchHistory();
+
+    // Auto fetch weather by current location if user allows
+    window.onload = () => {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(async (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+
+          showLoading();
+          try {
+            // Get city name from coordinates
+            const res = await fetch(`https://geocoding-api.open-meteo.com/v1/reverse?latitude=${lat}&longitude=${lon}&count=1`);
+            const data = await res.json();
+            if (data.results && data.results.length > 0) {
+              const cityName = data.results[0].name;
+              cityInput.value = cityName;
+              fetchWeather(cityName);
+            } else {
+              showError('Could not detect your location city.');
+              hideLoading();
+            }
+          } catch {
+            showError('Error detecting location.');
+            hideLoading();
+          }
+        }, () => {
+          // User denied location access, do nothing
+        });
+      }
+    }
+  </script>
+
+</body>
+</html>
